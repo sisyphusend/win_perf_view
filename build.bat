@@ -27,7 +27,7 @@ if not %errorlevel%==0 exit /b 1
 cl /nologo /O2 /EHsc /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I. ^
     src\main.cpp resource.res ^
     /Fe:PerfOverlay.exe ^
-    /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib pdh.lib dxgi.lib shell32.lib advapi32.lib
+    /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib pdh.lib dxgi.lib shell32.lib advapi32.lib dwmapi.lib
 
 if %errorlevel%==0 (
     echo.

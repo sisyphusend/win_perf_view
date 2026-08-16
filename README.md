@@ -14,9 +14,11 @@ A tiny always-on-top Windows HUD showing live CPU, RAM, and per-GPU usage.
 - Shows **every physical GPU separately, by name** (e.g. an integrated + discrete
   laptop GPU both show up as their own item) — adapter names come from DXGI,
   engine-usage counters are matched back to each adapter by LUID.
-- Fully transparent by default — no box, no border, just "label value%" text
-  floating directly over your desktop. A solid background card is one menu
-  click away if you'd rather have that.
+- Dashboard look: monospace font, each row a `label | rounded progress bar
+  with a slider-style handle | value`, columns aligned across rows, one
+  consistent accent color rather than red/yellow/green thresholds. Optional
+  solid rounded card background, or fully transparent floating text/bars —
+  one menu click to switch.
 - Two layouts: **vertical** (stacked rows) and **horizontal** (one line, items
   separated by thin dividers), switchable at runtime — the window resizes and
   stays clamped inside the screen when it does.
@@ -136,14 +138,20 @@ Deleting that registry key resets everything to defaults.
 - **Transparency** — the window is layered (`WS_EX_LAYERED`) with color-key
   transparency (`LWA_COLORKEY`): the whole card is painted in one reserved
   color first, which Windows then renders as a see-through hole, so only the
-  text and divider pixels drawn on top stay visible. Text uses grayscale
+  text and bar pixels drawn on top stay visible. Text uses grayscale
   antialiasing rather than ClearType, since ClearType's subpixel blending
   assumes a known solid background and fringes once that "background" is
-  actually an arbitrary desktop showing through.
+  actually an arbitrary desktop showing through. When the solid background is
+  turned on, the window is also clipped to a rounded region (`SetWindowRgn`)
+  matching the rounded card drawn inside it.
 - **Window sizing** — both layouts measure their actual text (via
   `GetTextExtentPoint32`) before the window is created or resized, so GPU
   names are never truncated and the card is always exactly as wide as it
-  needs to be.
+  needs to be. In vertical layout the label and value columns are sized to
+  the widest label/value across every row so the progress bars line up.
+- **GPU labels** — each row reads `GPU 0 · <model name>`, `GPU 1 · <model
+  name>`, etc., so multiple adapters stay distinguishable even if two happen
+  to share a name.
 
 ## Notes
 

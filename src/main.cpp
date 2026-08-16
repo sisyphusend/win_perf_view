@@ -19,6 +19,7 @@
 #include <pdhmsg.h>
 #include <dxgi.h>
 #include <shellapi.h>
+#include <dwmapi.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -33,6 +34,11 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "dwmapi.lib")
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
 
 namespace {
 
@@ -55,7 +61,7 @@ bool g_hudVisible = true;
 bool g_horizontalMode = false; // false = stacked rows (default), true = one line
 bool g_showBg = false;         // false = fully transparent (default), true = solid card
 bool g_locked = false;         // true = click-through, mouse passes to the window below
-bool g_showSparkline = false;  // vertical mode only: small history graph per row
+bool g_showSparkline = true;   // vertical mode only: small history graph per row
 bool g_hotkeyToggleEnabled = false;
 bool g_hotkeyLockEnabled = false;
 bool g_autoHideFullscreen = false; // hide the HUD while a game/app is exclusive-fullscreen
@@ -65,20 +71,27 @@ HWND g_mainHwnd = nullptr;
 HWND g_settingsHwnd = nullptr;
 HINSTANCE g_hInstance = nullptr;
 
-// Layout constants for the transparent, borderless HUD: no box, no swatch -
-// just "label value" pairs, separated by thin divider lines.
-constexpr int PAD = 8;
-constexpr int ROW_H = 24;              // vertical mode: row-to-row spacing
+// Layout constants. Vertical-mode rows are label | progress bar | value,
+// columns aligned across rows; horizontal mode stays a compact single line.
+constexpr int PAD = 14;
+constexpr int ROW_H = 40;              // vertical mode: row-to-row spacing
+constexpr int ROW_CONTENT_H = 18;      // vertical mode: text/bar vertical-centering reference
 constexpr int INLINE_ROW_H = 18;       // horizontal mode: single line content height
-constexpr int ROW_GAP = 10;            // gap between label and value
+constexpr int ROW_GAP = 10;            // horizontal mode: gap between label and value
+constexpr int COL_GAP = 14;            // vertical mode: gap either side of the bar
 constexpr int ITEM_GAP = 14;           // horizontal mode: padding either side of a divider
 constexpr int DIVIDER_W = 1;
-constexpr int WND_MIN_W = 140;
-constexpr int WND_MAX_W_VERTICAL = 380;
-constexpr int WND_MAX_W_HORIZONTAL = 640;
-constexpr int SPARK_W = 36;            // vertical mode: history graph width
+constexpr int WND_MIN_W = 170;
+constexpr int WND_MAX_W_VERTICAL = 460;
+constexpr int WND_MAX_W_HORIZONTAL = 1000; // wide enough that real GPU names/multi-GPU never get clipped
+constexpr int SPARK_W = 36;            // vertical mode, when sparklines replace the bar
 constexpr int SPARK_H = 12;
 constexpr size_t HISTORY_LEN = 40;     // ~40s of samples at 1 tick/s
+constexpr int BAR_TRACK_H = 4;         // vertical mode: progress bar thickness
+constexpr int BAR_HANDLE_D = 9;        // vertical mode: dot at the fill's leading edge
+constexpr int PREFERRED_BAR_W = 100;   // used only to pick the window's natural width
+constexpr int MIN_BAR_W = 40;
+constexpr int CORNER_RADIUS = 14;      // solid-background mode only
 
 NOTIFYICONDATAW g_trayIcon{};
 bool g_trayIconAdded = false;
@@ -368,16 +381,11 @@ void UpdateGpu() {
 // It must never match a color we actually draw with. g_showBg swaps that
 // fill for an opaque card instead (see OnPaint).
 constexpr COLORREF kColorKey = RGB(1, 1, 2);
-constexpr COLORREF kColorBg = RGB(17, 17, 21);
-constexpr COLORREF kColorCardBorder = RGB(48, 48, 55);
+constexpr COLORREF kColorBg = RGB(14, 14, 17);
 constexpr COLORREF kColorDivider = RGB(110, 110, 122);
-constexpr COLORREF kColorLabelText = RGB(210, 210, 218);
-
-COLORREF ColorForLoad(double percent) {
-    if (percent < 50.0) return RGB(94, 222, 138);
-    if (percent < 80.0) return RGB(244, 196, 66);
-    return RGB(244, 84, 84);
-}
+constexpr COLORREF kColorLabelText = RGB(220, 220, 227);
+constexpr COLORREF kColorAccent = RGB(46, 214, 224); // single accent for every bar/value, not severity-colored
+constexpr COLORREF kColorTrack = RGB(46, 46, 53);    // progress bar's unfilled track
 
 int TextWidth(HDC hdc, HFONT font, const std::wstring& text) {
     HFONT old = static_cast<HFONT>(SelectObject(hdc, font));
@@ -385,6 +393,25 @@ int TextWidth(HDC hdc, HFONT font, const std::wstring& text) {
     GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.size()), &sz);
     SelectObject(hdc, old);
     return sz.cx;
+}
+
+// "GPU 0 · GeForce RTX 3050" - numbered so multiple GPUs stay distinguishable
+// even if two happen to share a name, with the full (never-truncated) model
+// name after the separator.
+std::wstring GpuRowLabel(size_t index, const std::wstring& name) {
+    wchar_t buf[80];
+    swprintf_s(buf, L"GPU %d · %ls", static_cast<int>(index), name.c_str());
+    return buf;
+}
+
+void ComputeColumnWidths(HDC dc, int& labelColW, int& valueColW) {
+    wchar_t ramLabel[48];
+    swprintf_s(ramLabel, L"RAM %.1f/%.1fGB", g_ramUsedGB, g_ramTotalGB);
+    labelColW = std::max(TextWidth(dc, g_fontLabel, L"CPU"), TextWidth(dc, g_fontLabel, ramLabel));
+    for (size_t i = 0; i < g_gpuStats.size(); ++i) {
+        labelColW = std::max(labelColW, TextWidth(dc, g_fontLabel, GpuRowLabel(i, g_gpuStats[i].name)));
+    }
+    valueColW = TextWidth(dc, g_fontValue, L"100%");
 }
 
 // Small fixed-width line plot of the last HISTORY_LEN samples (0-100 scaled
@@ -409,41 +436,86 @@ void DrawSparkline(HDC hdc, int x, int y, int w, int h, const std::vector<float>
     DeleteObject(pen);
 }
 
-// Draws one "label value%" pair, label left, value right-aligned within
-// `width`, with an optional sparkline squeezed in between. No swatch, no
-// box - just text (and the graph, when enabled).
-void DrawRow(HDC hdc, int x, int y, int width, const wchar_t* label, double percent,
+// Rounded-capsule progress bar with a dot handle at the fill's leading edge
+// (like a slider thumb). yCenter is the bar's vertical midline.
+void DrawBar(HDC hdc, int x, int yCenter, int w, double percent) {
+    percent = std::max(0.0, std::min(100.0, percent));
+    int trackTop = yCenter - BAR_TRACK_H / 2;
+
+    HBRUSH trackBrush = CreateSolidBrush(kColorTrack);
+    HPEN trackPen = CreatePen(PS_SOLID, 1, kColorTrack);
+    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, trackBrush));
+    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, trackPen));
+    RoundRect(hdc, x, trackTop, x + w, trackTop + BAR_TRACK_H, BAR_TRACK_H, BAR_TRACK_H);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(trackBrush);
+    DeleteObject(trackPen);
+
+    int fillW = static_cast<int>(w * (percent / 100.0));
+    if (fillW > BAR_TRACK_H) {
+        HBRUSH fillBrush = CreateSolidBrush(kColorAccent);
+        HPEN fillPen = CreatePen(PS_SOLID, 1, kColorAccent);
+        HBRUSH oldFillBrush = static_cast<HBRUSH>(SelectObject(hdc, fillBrush));
+        HPEN oldFillPen = static_cast<HPEN>(SelectObject(hdc, fillPen));
+        RoundRect(hdc, x, trackTop, x + fillW, trackTop + BAR_TRACK_H, BAR_TRACK_H, BAR_TRACK_H);
+        SelectObject(hdc, oldFillBrush);
+        SelectObject(hdc, oldFillPen);
+        DeleteObject(fillBrush);
+        DeleteObject(fillPen);
+    }
+
+    int handleX = x + fillW;
+    HBRUSH dotBrush = CreateSolidBrush(kColorAccent);
+    HPEN dotPen = CreatePen(PS_SOLID, 1, kColorAccent);
+    HBRUSH oldDotBrush = static_cast<HBRUSH>(SelectObject(hdc, dotBrush));
+    HPEN oldDotPen = static_cast<HPEN>(SelectObject(hdc, dotPen));
+    Ellipse(hdc, handleX - BAR_HANDLE_D / 2, yCenter - BAR_HANDLE_D / 2, handleX + BAR_HANDLE_D / 2,
+            yCenter + BAR_HANDLE_D / 2);
+    SelectObject(hdc, oldDotBrush);
+    SelectObject(hdc, oldDotPen);
+    DeleteObject(dotBrush);
+    DeleteObject(dotPen);
+}
+
+// Draws one row: label | progress bar (or sparkline, if enabled - the two
+// are mutually exclusive to avoid clutter) | value, three columns aligned
+// across every row via the labelColW/valueColW/barW the caller computed.
+void DrawRow(HDC hdc, int x, int y, int labelColW, int barW, int valueColW, const wchar_t* label, double percent,
              const std::vector<float>* history) {
     percent = std::max(0.0, std::min(100.0, percent));
-    COLORREF color = ColorForLoad(percent);
 
     SelectObject(hdc, g_fontLabel);
     SetTextColor(hdc, kColorLabelText);
-    TextOutW(hdc, x, y, label, static_cast<int>(wcslen(label)));
+    SIZE labelSz{};
+    GetTextExtentPoint32W(hdc, label, static_cast<int>(wcslen(label)), &labelSz);
+    TextOutW(hdc, x, y + (ROW_CONTENT_H - labelSz.cy) / 2, label, static_cast<int>(wcslen(label)));
+
+    int barX = x + labelColW + COL_GAP;
+    if (g_showSparkline && history) {
+        DrawSparkline(hdc, barX, y + (ROW_CONTENT_H - SPARK_H) / 2, barW, SPARK_H, *history, kColorAccent);
+    } else {
+        DrawBar(hdc, barX, y + ROW_CONTENT_H / 2, barW, percent);
+    }
 
     wchar_t valBuf[16];
     swprintf_s(valBuf, L"%.0f%%", percent);
     SelectObject(hdc, g_fontValue);
-    SIZE sz{};
-    GetTextExtentPoint32W(hdc, valBuf, static_cast<int>(wcslen(valBuf)), &sz);
-    int valueX = x + width - sz.cx;
-
-    if (g_showSparkline && history) {
-        int sparkX = valueX - ROW_GAP / 2 - SPARK_W;
-        int sparkY = y + 2;
-        DrawSparkline(hdc, sparkX, sparkY, SPARK_W, SPARK_H, *history, color);
-    }
-
-    SetTextColor(hdc, color);
-    TextOutW(hdc, valueX, y - 3, valBuf, static_cast<int>(wcslen(valBuf)));
+    SIZE valSz{};
+    GetTextExtentPoint32W(hdc, valBuf, static_cast<int>(wcslen(valBuf)), &valSz);
+    int valueX = barX + barW + COL_GAP + (valueColW - valSz.cx);
+    SetTextColor(hdc, kColorAccent);
+    TextOutW(hdc, valueX, y + (ROW_CONTENT_H - valSz.cy) / 2, valBuf, static_cast<int>(wcslen(valBuf)));
 }
 
 // Horizontal-mode variant: "label value%" packed tightly left-to-right (no
-// right-alignment against a row width). Returns the pixel width used, so the
-// caller can advance x for the next metric block.
+// right-alignment against a row width). The value is right-aligned within a
+// slot sized to "100%" - the widest possible reading - and always returns
+// that slot's full width as consumed, regardless of the actual digit count.
+// Otherwise "9%" vs "34%" vs "100%" are different pixel widths, and every
+// divider/item after this one would shift left-right as the number changes.
 int DrawMetricInline(HDC hdc, int x, int y, const wchar_t* label, double percent) {
     percent = std::max(0.0, std::min(100.0, percent));
-    COLORREF color = ColorForLoad(percent);
 
     SelectObject(hdc, g_fontLabel);
     SIZE labelSz{};
@@ -451,16 +523,19 @@ int DrawMetricInline(HDC hdc, int x, int y, const wchar_t* label, double percent
     SetTextColor(hdc, kColorLabelText);
     TextOutW(hdc, x, y, label, static_cast<int>(wcslen(label)));
 
-    int valueX = x + labelSz.cx + ROW_GAP / 2;
+    SelectObject(hdc, g_fontValue);
+    SIZE slotSz{};
+    GetTextExtentPoint32W(hdc, L"100%", 4, &slotSz);
+    int valueSlotX = x + labelSz.cx + ROW_GAP / 2;
+
     wchar_t valBuf[16];
     swprintf_s(valBuf, L"%.0f%%", percent);
-    SelectObject(hdc, g_fontValue);
     SIZE valSz{};
     GetTextExtentPoint32W(hdc, valBuf, static_cast<int>(wcslen(valBuf)), &valSz);
-    SetTextColor(hdc, color);
-    TextOutW(hdc, valueX, y - 3, valBuf, static_cast<int>(wcslen(valBuf)));
+    SetTextColor(hdc, kColorAccent);
+    TextOutW(hdc, valueSlotX + (slotSz.cx - valSz.cx), y - 3, valBuf, static_cast<int>(wcslen(valBuf)));
 
-    return (valueX + valSz.cx) - x;
+    return (valueSlotX + slotSz.cx) - x;
 }
 
 // Thin vertical divider between horizontal-mode blocks, matching the
@@ -490,17 +565,17 @@ void OnPaint(HWND hwnd) {
     HBITMAP oldBmp = static_cast<HBITMAP>(SelectObject(memDC, memBmp));
 
     if (g_showBg) {
-        // Opaque solid card: any color other than kColorKey stays fully
-        // visible under LWA_COLORKEY, so this is a normal background fill.
-        HPEN borderPen = CreatePen(PS_SOLID, 1, kColorCardBorder);
-        HPEN oldPen = static_cast<HPEN>(SelectObject(memDC, borderPen));
+        // Opaque solid rounded card: any color other than kColorKey stays
+        // fully visible under LWA_COLORKEY. The window region is clipped to
+        // match this same rounded rect (see ApplyWindowShape).
         HBRUSH bgBrush = CreateSolidBrush(kColorBg);
         HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(memDC, bgBrush));
-        Rectangle(memDC, 0, 0, width, height);
+        HPEN nullPen = static_cast<HPEN>(GetStockObject(NULL_PEN));
+        HPEN oldPen = static_cast<HPEN>(SelectObject(memDC, nullPen));
+        RoundRect(memDC, 0, 0, width, height, CORNER_RADIUS, CORNER_RADIUS);
         SelectObject(memDC, oldBrush);
         SelectObject(memDC, oldPen);
         DeleteObject(bgBrush);
-        DeleteObject(borderPen);
     } else {
         // Fully transparent: paint the whole card in the color-key color,
         // which SetLayeredWindowAttributes(..., LWA_COLORKEY) makes
@@ -521,21 +596,26 @@ void OnPaint(HWND hwnd) {
         x += DrawMetricInline(memDC, x, y, L"CPU", g_cpuPercent);
         x = DrawDivider(memDC, x, INLINE_ROW_H);
         x += DrawMetricInline(memDC, x, y, ramLabel, g_ramPercent);
-        for (auto& stat : g_gpuStats) {
+        for (size_t i = 0; i < g_gpuStats.size(); ++i) {
             x = DrawDivider(memDC, x, INLINE_ROW_H);
-            x += DrawMetricInline(memDC, x, y, stat.name.c_str(), stat.percent);
+            std::wstring gpuLabel = GpuRowLabel(i, g_gpuStats[i].name);
+            x += DrawMetricInline(memDC, x, y, gpuLabel.c_str(), g_gpuStats[i].percent);
         }
     } else {
-        int rowX = PAD;
+        int labelColW, valueColW;
+        ComputeColumnWidths(memDC, labelColW, valueColW);
         int rowWidth = width - 2 * PAD;
+        int barW = std::max(MIN_BAR_W, rowWidth - labelColW - valueColW - 2 * COL_GAP);
         int rowY = PAD;
 
-        DrawRow(memDC, rowX, rowY, rowWidth, L"CPU", g_cpuPercent, &g_cpuHistory);
+        DrawRow(memDC, PAD, rowY, labelColW, barW, valueColW, L"CPU", g_cpuPercent, &g_cpuHistory);
         rowY += ROW_H;
-        DrawRow(memDC, rowX, rowY, rowWidth, ramLabel, g_ramPercent, &g_ramHistory);
+        DrawRow(memDC, PAD, rowY, labelColW, barW, valueColW, ramLabel, g_ramPercent, &g_ramHistory);
         rowY += ROW_H;
-        for (auto& stat : g_gpuStats) {
-            DrawRow(memDC, rowX, rowY, rowWidth, stat.name.c_str(), stat.percent, &stat.history);
+        for (size_t i = 0; i < g_gpuStats.size(); ++i) {
+            std::wstring gpuLabel = GpuRowLabel(i, g_gpuStats[i].name);
+            DrawRow(memDC, PAD, rowY, labelColW, barW, valueColW, gpuLabel.c_str(), g_gpuStats[i].percent,
+                    &g_gpuStats[i].history);
             rowY += ROW_H;
         }
     }
@@ -563,7 +643,9 @@ SIZE ComputeCardSize(HDC dc) {
         };
         int dividerSpan = 2 * ITEM_GAP + DIVIDER_W;
         int totalW = blockWidth(L"CPU") + dividerSpan + blockWidth(ramLabel);
-        for (auto& stat : g_gpuStats) totalW += dividerSpan + blockWidth(stat.name);
+        for (size_t i = 0; i < g_gpuStats.size(); ++i) {
+            totalW += dividerSpan + blockWidth(GpuRowLabel(i, g_gpuStats[i].name));
+        }
 
         SIZE sz;
         sz.cx = std::max(WND_MIN_W, std::min(WND_MAX_W_HORIZONTAL, totalW + 2 * PAD));
@@ -571,12 +653,9 @@ SIZE ComputeCardSize(HDC dc) {
         return sz;
     }
 
-    int sparkExtra = g_showSparkline ? (SPARK_W + ROW_GAP) : 0;
-    int contentW = std::max(TextWidth(dc, g_fontLabel, L"CPU") + ROW_GAP + sparkExtra + valueW,
-                             TextWidth(dc, g_fontLabel, ramLabel) + ROW_GAP + sparkExtra + valueW);
-    for (auto& stat : g_gpuStats) {
-        contentW = std::max(contentW, TextWidth(dc, g_fontLabel, stat.name) + ROW_GAP + sparkExtra + valueW);
-    }
+    int labelColW, valueColW;
+    ComputeColumnWidths(dc, labelColW, valueColW);
+    int contentW = labelColW + COL_GAP + PREFERRED_BAR_W + COL_GAP + valueColW;
 
     SIZE sz;
     sz.cx = std::max(WND_MIN_W, std::min(WND_MAX_W_VERTICAL, contentW + 2 * PAD));
@@ -595,6 +674,23 @@ void ClampToWorkArea(int& x, int& y, int w, int h) {
     if (y < work.top) y = work.top;
 }
 
+// The window is only clipped to a rounded region in solid-background mode -
+// when transparent, there's no visible box to round, and clipping would
+// just crop the floating text/bars for no reason.
+void ApplyWindowShape(HWND hwnd, int w, int h) {
+    if (g_showBg) {
+        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, CORNER_RADIUS * 2, CORNER_RADIUS * 2), TRUE);
+    } else {
+        SetWindowRgn(hwnd, nullptr, TRUE);
+    }
+}
+
+void ReapplyWindowShape(HWND hwnd) {
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    ApplyWindowShape(hwnd, rc.right, rc.bottom);
+}
+
 // Resizes the window for the current layout mode, keeping its top-left
 // corner where it was unless that would push the (often much wider or
 // narrower) new size off-screen - then it's nudged back into the work area.
@@ -610,6 +706,7 @@ void RelayoutWindow(HWND hwnd) {
     ClampToWorkArea(x, y, sz.cx, sz.cy);
 
     SetWindowPos(hwnd, nullptr, x, y, sz.cx, sz.cy, SWP_NOZORDER | SWP_NOACTIVATE);
+    ApplyWindowShape(hwnd, sz.cx, sz.cy);
     InvalidateRect(hwnd, nullptr, TRUE);
 }
 
@@ -641,7 +738,7 @@ void LoadSettings(int& x, int& y, bool& hasPosition) {
     g_showBg = RegReadDword(key, L"ShowBackground", 0) != 0;
     g_locked = RegReadDword(key, L"Locked", 0) != 0;
     g_hudVisible = RegReadDword(key, L"Visible", 1) != 0;
-    g_showSparkline = RegReadDword(key, L"ShowSparkline", 0) != 0;
+    g_showSparkline = RegReadDword(key, L"ShowSparkline", 1) != 0;
     g_hotkeyToggleEnabled = RegReadDword(key, L"HotkeyToggle", 0) != 0;
     g_hotkeyLockEnabled = RegReadDword(key, L"HotkeyLock", 0) != 0;
     g_autoHideFullscreen = RegReadDword(key, L"AutoHideFullscreen", 0) != 0;
@@ -805,6 +902,11 @@ void ShowActionMenu(HWND hwnd) {
 }
 
 // --- settings window --------------------------------------------------
+// Owner-drawn throughout (BS_OWNERDRAW instead of BS_AUTOCHECKBOX /
+// BS_DEFPUSHBUTTON) so it can match the HUD's dark/monospace/cyan-accent
+// look - native checkbox glyphs and button chrome ignore custom colors/
+// fonts regardless of WM_CTLCOLORBTN, so there's no themeable middle ground
+// short of full owner-draw.
 
 constexpr int CHK_BG = 2001;
 constexpr int CHK_HORIZONTAL = 2002;
@@ -816,72 +918,205 @@ constexpr int CHK_HOTKEY_LOCK = 2007;
 constexpr int CHK_AUTOHIDE_FULLSCREEN = 2008;
 constexpr int BTN_CLOSE = 2009;
 
+constexpr int SETTINGS_PAD = 20;
+constexpr int SETTINGS_CHK_BOX = 14;
+constexpr int SETTINGS_CHK_GAP = 10;
+constexpr int SETTINGS_ROW_H = 30;
+constexpr int SETTINGS_BTN_W = 100;
+constexpr int SETTINGS_BTN_H = 30;
+constexpr int SETTINGS_BTN_GAP = 18;
+
+const wchar_t* kSettingsLabels[] = {
+    L"Show background",
+    L"Horizontal layout",
+    L"Lock position (click-through)",
+    L"Show history graphs (vertical layout only)",
+    L"Start with Windows",
+    L"Global hotkey Ctrl+Alt+O: Show/Hide",
+    L"Global hotkey Ctrl+Alt+L: Lock/Unlock",
+    L"Auto-hide when a game is fullscreen",
+};
+constexpr int kSettingsRowCount = 8;
+
+// BM_SETCHECK/BM_GETCHECK only track state for the standard checkbox button
+// styles (BS_CHECKBOX/BS_AUTOCHECKBOX/...) - BS_OWNERDRAW isn't one of them,
+// so the check state is tracked by hand via GWLP_USERDATA instead.
 bool IsChecked(HWND checkbox) {
-    return SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    return GetWindowLongPtrW(checkbox, GWLP_USERDATA) != 0;
+}
+
+void SetChecked(HWND checkbox, bool checked) {
+    SetWindowLongPtrW(checkbox, GWLP_USERDATA, checked ? 1 : 0);
+}
+
+// Sized to fit the longest label at g_fontLabel's actual measured width, so
+// nothing gets clipped regardless of font/DPI - same principle as the HUD's
+// own dynamic sizing.
+SIZE ComputeSettingsClientSize(HDC dc) {
+    int textW = 0;
+    for (int i = 0; i < kSettingsRowCount; ++i) {
+        textW = std::max(textW, TextWidth(dc, g_fontLabel, kSettingsLabels[i]));
+    }
+    SIZE sz;
+    sz.cx = 2 * SETTINGS_PAD + SETTINGS_CHK_BOX + SETTINGS_CHK_GAP + textW;
+    sz.cy = SETTINGS_PAD + SETTINGS_ROW_H * kSettingsRowCount + SETTINGS_BTN_GAP + SETTINGS_BTN_H + SETTINGS_PAD;
+    return sz;
+}
+
+void DrawSettingsCheckbox(LPDRAWITEMSTRUCT dis) {
+    HDC hdc = dis->hDC;
+    const RECT& rc = dis->rcItem;
+    bool checked = IsChecked(dis->hwndItem);
+
+    HBRUSH bgBrush = CreateSolidBrush(kColorBg);
+    FillRect(hdc, &rc, bgBrush);
+    DeleteObject(bgBrush);
+
+    int boxTop = rc.top + (rc.bottom - rc.top - SETTINGS_CHK_BOX) / 2;
+    int boxLeft = rc.left;
+
+    HPEN boxPen = CreatePen(PS_SOLID, 1, checked ? kColorAccent : kColorTrack);
+    HBRUSH boxBrush = CreateSolidBrush(checked ? kColorAccent : kColorBg);
+    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, boxPen));
+    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, boxBrush));
+    Rectangle(hdc, boxLeft, boxTop, boxLeft + SETTINGS_CHK_BOX, boxTop + SETTINGS_CHK_BOX);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(boxPen);
+    DeleteObject(boxBrush);
+
+    if (checked) {
+        HPEN checkPen = CreatePen(PS_SOLID, 2, kColorBg);
+        HPEN oldCheckPen = static_cast<HPEN>(SelectObject(hdc, checkPen));
+        MoveToEx(hdc, boxLeft + 3, boxTop + 7, nullptr);
+        LineTo(hdc, boxLeft + 6, boxTop + 10);
+        LineTo(hdc, boxLeft + 11, boxTop + 3);
+        SelectObject(hdc, oldCheckPen);
+        DeleteObject(checkPen);
+    }
+
+    wchar_t text[128];
+    GetWindowTextW(dis->hwndItem, text, 128);
+    SelectObject(hdc, g_fontLabel);
+    SetTextColor(hdc, kColorLabelText);
+    SetBkMode(hdc, TRANSPARENT);
+    SIZE textSz{};
+    GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &textSz);
+    int textY = rc.top + (rc.bottom - rc.top - textSz.cy) / 2;
+    TextOutW(hdc, boxLeft + SETTINGS_CHK_BOX + SETTINGS_CHK_GAP, textY, text, static_cast<int>(wcslen(text)));
+}
+
+void DrawSettingsButton(LPDRAWITEMSTRUCT dis) {
+    HDC hdc = dis->hDC;
+    const RECT& rc = dis->rcItem;
+    bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+
+    HBRUSH brush = CreateSolidBrush(pressed ? kColorAccent : kColorTrack);
+    HPEN pen = CreatePen(PS_SOLID, 1, kColorAccent);
+    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, brush));
+    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+
+    wchar_t text[32];
+    GetWindowTextW(dis->hwndItem, text, 32);
+    SelectObject(hdc, g_fontLabel);
+    SetTextColor(hdc, pressed ? kColorBg : kColorAccent);
+    SetBkMode(hdc, TRANSPARENT);
+    SIZE sz{};
+    GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &sz);
+    TextOutW(hdc, rc.left + ((rc.right - rc.left) - sz.cx) / 2, rc.top + ((rc.bottom - rc.top) - sz.cy) / 2, text,
+             static_cast<int>(wcslen(text)));
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
-            HFONT uiFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-            int y = 16;
-            auto addCheck = [&](int id, const wchar_t* text, bool checked) {
-                HWND c = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                          16, y, 320, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                          g_hInstance, nullptr);
-                SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont), TRUE);
-                SendMessageW(c, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
-                y += 28;
-            };
+            BOOL dark = TRUE;
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 
-            addCheck(CHK_BG, L"Show background", g_showBg);
-            addCheck(CHK_HORIZONTAL, L"Horizontal layout", g_horizontalMode);
-            addCheck(CHK_LOCK, L"Lock position (click-through)", g_locked);
-            addCheck(CHK_SPARKLINE, L"Show history graphs (vertical layout only)", g_showSparkline);
-            addCheck(CHK_AUTOSTART, L"Start with Windows", IsAutoStartEnabled());
-            addCheck(CHK_HOTKEY_TOGGLE, L"Global hotkey Ctrl+Alt+O: Show/Hide", g_hotkeyToggleEnabled);
-            addCheck(CHK_HOTKEY_LOCK, L"Global hotkey Ctrl+Alt+L: Lock/Unlock", g_hotkeyLockEnabled);
-            addCheck(CHK_AUTOHIDE_FULLSCREEN, L"Auto-hide when a game is fullscreen", g_autoHideFullscreen);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            int rowW = client.right - 2 * SETTINGS_PAD;
 
-            HWND closeBtn = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 16,
-                                             y + 8, 90, 26, hwnd,
-                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(BTN_CLOSE)), g_hInstance,
-                                             nullptr);
-            SendMessageW(closeBtn, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont), TRUE);
+            int id[] = {CHK_BG,          CHK_HORIZONTAL,     CHK_LOCK,        CHK_SPARKLINE,
+                        CHK_AUTOSTART,   CHK_HOTKEY_TOGGLE,  CHK_HOTKEY_LOCK, CHK_AUTOHIDE_FULLSCREEN};
+            bool checked[] = {g_showBg,
+                               g_horizontalMode,
+                               g_locked,
+                               g_showSparkline,
+                               IsAutoStartEnabled(),
+                               g_hotkeyToggleEnabled,
+                               g_hotkeyLockEnabled,
+                               g_autoHideFullscreen};
+
+            int y = SETTINGS_PAD;
+            for (int i = 0; i < kSettingsRowCount; ++i) {
+                HWND c = CreateWindowExW(0, L"BUTTON", kSettingsLabels[i], WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                          SETTINGS_PAD, y, rowW, SETTINGS_ROW_H, hwnd,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(id[i])), g_hInstance, nullptr);
+                SetChecked(c, checked[i]);
+                y += SETTINGS_ROW_H;
+            }
+
+            CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, SETTINGS_PAD,
+                             y + SETTINGS_BTN_GAP, SETTINGS_BTN_W, SETTINGS_BTN_H, hwnd,
+                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(BTN_CLOSE)), g_hInstance, nullptr);
             return 0;
+        }
+
+        case WM_DRAWITEM: {
+            LPDRAWITEMSTRUCT dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+            if (dis->CtlID == static_cast<UINT>(BTN_CLOSE)) DrawSettingsButton(dis);
+            else DrawSettingsCheckbox(dis);
+            return TRUE;
         }
 
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             if (HIWORD(wParam) != BN_CLICKED) return 0;
+            if (id == BTN_CLOSE) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+
+            // BS_OWNERDRAW replaces BS_AUTOCHECKBOX's automatic toggle-on-click,
+            // so the check state has to be flipped by hand before acting on it.
             HWND ctrl = reinterpret_cast<HWND>(lParam);
+            bool newChecked = !IsChecked(ctrl);
+            SetChecked(ctrl, newChecked);
+            InvalidateRect(ctrl, nullptr, TRUE);
 
             switch (id) {
                 case CHK_BG:
-                    g_showBg = IsChecked(ctrl);
+                    g_showBg = newChecked;
+                    ReapplyWindowShape(g_mainHwnd);
                     InvalidateRect(g_mainHwnd, nullptr, TRUE);
                     SaveSettings(g_mainHwnd);
                     break;
                 case CHK_HORIZONTAL:
-                    g_horizontalMode = IsChecked(ctrl);
+                    g_horizontalMode = newChecked;
                     RelayoutWindow(g_mainHwnd);
                     SaveSettings(g_mainHwnd);
                     break;
                 case CHK_LOCK:
-                    SetLocked(g_mainHwnd, IsChecked(ctrl));
+                    SetLocked(g_mainHwnd, newChecked);
                     SaveSettings(g_mainHwnd);
                     break;
                 case CHK_SPARKLINE:
-                    g_showSparkline = IsChecked(ctrl);
+                    g_showSparkline = newChecked;
                     RelayoutWindow(g_mainHwnd);
                     SaveSettings(g_mainHwnd);
                     break;
                 case CHK_AUTOSTART:
-                    SetAutoStart(IsChecked(ctrl));
+                    SetAutoStart(newChecked);
                     break;
                 case CHK_HOTKEY_TOGGLE:
-                    g_hotkeyToggleEnabled = IsChecked(ctrl);
-                    if (g_hotkeyToggleEnabled) {
+                    g_hotkeyToggleEnabled = newChecked;
+                    if (newChecked) {
                         RegisterHotKey(g_mainHwnd, HOTKEY_ID_TOGGLE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'O');
                     } else {
                         UnregisterHotKey(g_mainHwnd, HOTKEY_ID_TOGGLE);
@@ -889,8 +1124,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     SaveSettings(g_mainHwnd);
                     break;
                 case CHK_HOTKEY_LOCK:
-                    g_hotkeyLockEnabled = IsChecked(ctrl);
-                    if (g_hotkeyLockEnabled) {
+                    g_hotkeyLockEnabled = newChecked;
+                    if (newChecked) {
                         RegisterHotKey(g_mainHwnd, HOTKEY_ID_LOCK, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'L');
                     } else {
                         UnregisterHotKey(g_mainHwnd, HOTKEY_ID_LOCK);
@@ -898,11 +1133,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     SaveSettings(g_mainHwnd);
                     break;
                 case CHK_AUTOHIDE_FULLSCREEN:
-                    g_autoHideFullscreen = IsChecked(ctrl);
+                    g_autoHideFullscreen = newChecked;
                     SaveSettings(g_mainHwnd);
-                    break;
-                case BTN_CLOSE:
-                    DestroyWindow(hwnd);
                     break;
             }
             return 0;
@@ -938,13 +1170,17 @@ void OpenSettingsWindow() {
         wc.hInstance = g_hInstance;
         wc.lpszClassName = className;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.hbrBackground = CreateSolidBrush(kColorBg);
         wc.hIcon = LoadIconW(g_hInstance, MAKEINTRESOURCE(IDI_APPICON));
         RegisterClassExW(&wc);
         classRegistered = true;
     }
 
-    RECT rc{0, 0, 360, 268};
+    HDC measureDC = GetDC(nullptr);
+    SIZE clientSz = ComputeSettingsClientSize(measureDC);
+    ReleaseDC(nullptr, measureDC);
+
+    RECT rc{0, 0, clientSz.cx, clientSz.cy};
     DWORD style = WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
     DWORD exStyle = WS_EX_DLGMODALFRAME;
     AdjustWindowRectEx(&rc, style, FALSE, exStyle);
@@ -1039,6 +1275,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SaveSettings(hwnd);
             } else if (LOWORD(wParam) == ID_MENU_BG) {
                 g_showBg = !g_showBg;
+                ReapplyWindowShape(hwnd);
                 InvalidateRect(hwnd, nullptr, TRUE);
                 SaveSettings(hwnd);
             } else if (LOWORD(wParam) == ID_MENU_LOCK) {
@@ -1093,15 +1330,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     // blending assumes a known solid background, which produces color
     // fringing once the "background" is actually a color-key transparent
     // hole showing an arbitrary desktop through it. Plain grayscale AA
-    // avoids that fringe.
+    // avoids that fringe. Monospace (Consolas) for the dashboard look.
     g_fontLabel = CreateFontW(
-        -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
     g_fontValue = CreateFontW(
-        -17, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        -14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
 
     // Size the card to fit the widest content (GPU names in particular)
     // instead of truncating text to a fixed window width.
@@ -1150,6 +1387,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_mainHwnd = hwnd;
 
     SetLayeredWindowAttributes(hwnd, kColorKey, 0, LWA_COLORKEY);
+    ApplyWindowShape(hwnd, wndW, wndH);
 
     if (g_hotkeyToggleEnabled) RegisterHotKey(hwnd, HOTKEY_ID_TOGGLE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'O');
     if (g_hotkeyLockEnabled) RegisterHotKey(hwnd, HOTKEY_ID_LOCK, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'L');

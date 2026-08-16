@@ -9,7 +9,7 @@ if not %errorlevel%==0 (
 windres resource.rc -O coff -o resource_res.o
 if not %errorlevel%==0 exit /b 1
 
-g++ -O2 -std=c++17 -municode -mwindows -I. src\main.cpp resource_res.o -o PerfOverlay.exe -lpdh -lgdi32 -luser32 -ldxgi -lshell32 -ladvapi32
+g++ -O2 -std=c++17 -municode -mwindows -I. src\main.cpp resource_res.o -o PerfOverlay.exe -lpdh -lgdi32 -luser32 -ldxgi -lshell32 -ladvapi32 -ldwmapi
 
 if %errorlevel%==0 (
     echo.
