@@ -1,0 +1,7 @@
+# Build outputs — not committed, attach built binaries to GitHub Releases instead
+*.exe
+*.o
+*.obj
+*.res
+*.ilk
+*.pdb
