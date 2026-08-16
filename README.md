@@ -2,6 +2,7 @@
 
 ![License: Unlicense](https://img.shields.io/badge/License-Unlicense-blue.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue.svg)
+[![Latest Release](https://img.shields.io/github/v/release/Vinodhariharan/PerfOverlay)](https://github.com/Vinodhariharan/PerfOverlay/releases/latest)
 
 A tiny always-on-top Windows HUD showing live CPU, RAM, and per-GPU usage.
 
@@ -26,6 +27,19 @@ A tiny always-on-top Windows HUD showing live CPU, RAM, and per-GPU usage.
   toggle Show/Hide or Lock without touching the tray, and auto-hide whenever
   a fullscreen app/game takes focus — all configured from a native Settings
   window (menu → Settings...).
+
+## Download
+
+Don't want to build it yourself? Grab the latest build from
+**[Releases](https://github.com/Vinodhariharan/PerfOverlay/releases/latest)** —
+download `PerfOverlay.exe` and run it, no compiler needed.
+
+> **Windows will likely warn you on first run** ("Windows protected your PC")
+> because the exe isn't code-signed. That's expected for small unsigned
+> freeware like this, not a sign anything's wrong — click **More info → Run
+> anyway**. (If you'd rather not trust an unsigned binary at all, build it
+> yourself from source below — you can read every line of what you're
+> compiling.)
 
 ## Requirements
 
