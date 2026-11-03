@@ -4,6 +4,8 @@
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue.svg)
 [![Latest Release](https://img.shields.io/github/v/release/sisyphusend/win_perf_view)](https://github.com/sisyphusend/win_perf_view/releases/latest)
 
+**English** | [简体中文](README.zh-CN.md)
+
 A tiny always-on-top Windows HUD showing live CPU, RAM, and per-GPU usage.
 
 - Pure Win32 + GDI + PDH (Performance Data Helper) + DXGI — no .NET, no Electron, no injection.
