@@ -14,6 +14,9 @@
 // Every toggle and the window position are saved to
 // HKCU\Software\PerfOverlay and restored on the next launch.
 
+// windows.h otherwise defines min/max macros that break std::min/std::max below.
+#define NOMINMAX
+
 #include <windows.h>
 #include <pdh.h>
 #include <pdhmsg.h>

@@ -24,7 +24,7 @@ exit /b 1
 rc.exe /nologo /fo resource.res resource.rc
 if not %errorlevel%==0 exit /b 1
 
-cl /nologo /O2 /EHsc /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I. ^
+cl /nologo /O2 /EHsc /std:c++17 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I. ^
     src\main.cpp resource.res ^
     /Fe:PerfOverlay.exe ^
     /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib pdh.lib dxgi.lib shell32.lib advapi32.lib dwmapi.lib
