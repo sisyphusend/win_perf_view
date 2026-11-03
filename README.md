@@ -2,7 +2,7 @@
 
 ![License: Unlicense](https://img.shields.io/badge/License-Unlicense-blue.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue.svg)
-[![Latest Release](https://img.shields.io/github/v/release/Vinodhariharan/PerfOverlay)](https://github.com/Vinodhariharan/PerfOverlay/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/sisyphusend/win_perf_view)](https://github.com/sisyphusend/win_perf_view/releases/latest)
 
 A tiny always-on-top Windows HUD showing live CPU, RAM, and per-GPU usage.
 
@@ -33,7 +33,7 @@ A tiny always-on-top Windows HUD showing live CPU, RAM, and per-GPU usage.
 ## Download
 
 Don't want to build it yourself? Grab the latest build from
-**[Releases](https://github.com/Vinodhariharan/PerfOverlay/releases/latest)** —
+**[Releases](https://github.com/sisyphusend/win_perf_view/releases/latest)** —
 download `PerfOverlay.exe` and run it, no compiler needed.
 
 > **Windows will likely warn you on first run** ("Windows protected your PC")
@@ -163,3 +163,10 @@ Deleting that registry key resets everything to defaults.
 
 [Unlicense](LICENSE) — public domain. Do anything you want with it, no
 attribution required.
+
+## Reference
+
+Forked from [Vinodhariharan/PerfOverlay](https://github.com/Vinodhariharan/PerfOverlay)
+— thanks for the original project. This fork additionally fixes the MSVC
+build (missing `/std:c++17` in `build.bat` and a `windows.h` min/max macro
+clash fixed via `NOMINMAX`).
